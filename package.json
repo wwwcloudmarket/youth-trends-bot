@@ -1,0 +1,12 @@
+{
+  "name": "youth-trends-bot",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node api/send-test.js"
+  },
+  "dependencies": {
+    "node-fetch": "^3.3.2"
+  },
+  "type": "module"
+}
