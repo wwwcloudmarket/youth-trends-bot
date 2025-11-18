@@ -1,15 +1,9 @@
 {
-  "version": 2,
-  "builds": [
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "crons": [
     {
-      "src": "api/send-test.js",
-      "use": "@vercel/node"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/api/send-test",
-      "dest": "/api/send-test.js"
+      "path": "/api/send-trends",
+      "schedule": "0 16 * * *"
     }
   ]
 }
