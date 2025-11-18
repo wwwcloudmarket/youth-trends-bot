@@ -5,8 +5,8 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHANNEL_ID = process.env.TELEGRAM_CHANNEL_ID;
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
 
-// Источники: мода / кроссовки / музыка
-// (можно потом заменить под свои любимые медиа)
+// Источники: мода / кроссовки / музыка.
+// Потом легко поменяем на свои любимые медиа.
 const RSS_SOURCES = [
   {
     name: "Crisp Culture",
@@ -25,12 +25,68 @@ const RSS_SOURCES = [
   }
 ];
 
-// Настройки парсера XML
 const parser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: "@_"
 });
 
+// Вытаскиваем картинку из item (enclosure, media:content, <img> в описании)
+function extractImageFromItem(it) {
+  // <enclosure url="...">
+  if (it.enclosure && it.enclosure["@_url"]) {
+    const type = it.enclosure["@_type"] || "";
+    if (!type || type.startsWith("image/")) {
+      return it.enclosure["@_url"];
+    }
+  }
+
+  // <media:content url="...">
+  const media = it["media:content"] || it["media:thumbnail"];
+  if (media) {
+    if (Array.isArray(media)) {
+      const m = media.find(
+        (x) => x["@_url"] && (!x["@_type"] || x["@_type"].startsWith("image/"))
+      );
+      if (m) return m["@_url"];
+    } else if (
+      media["@_url"] &&
+      (!media["@_type"] || media["@_type"].startsWith("image/"))
+    ) {
+      return media["@_url"];
+    }
+  }
+
+  // Пробуем достать <img src="..."> из description / content
+  const html =
+    it["content:encoded"] ||
+    it.description ||
+    it.summary ||
+    it.content ||
+    "";
+
+  const imgMatch = html.match(/<img[^>]+src=["']([^"']+)["']/i);
+  if (imgMatch && imgMatch[1]) {
+    return imgMatch[1];
+  }
+
+  return null;
+}
+
+// Убираем HTML-теги
+function stripHtml(html) {
+  if (!html) return "";
+  return html.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
+}
+
+function truncate(text, maxLen) {
+  if (!text) return "";
+  if (text.length <= maxLen) return text;
+  const cut = text.slice(0, maxLen);
+  const lastSpace = cut.lastIndexOf(" ");
+  return (lastSpace > 0 ? cut.slice(0, lastSpace) : cut) + "…";
+}
+
+// Забираем последние записи из одного RSS-источника
 async function fetchRssItems(source) {
   try {
     const res = await fetch(source.url);
@@ -42,24 +98,18 @@ async function fetchRssItems(source) {
     const xml = await res.text();
     const data = parser.parse(xml);
 
-    // Типичная структура RSS 2.0: rss -> channel -> item[]
     let items = data?.rss?.channel?.item || data?.channel?.item;
-
     if (!items) {
-      // На всякий случай, если это Atom или другой формат — просто выходим
       console.warn("No items in RSS for", source.url);
       return [];
     }
 
-    // Если один объект, делаем массив
     if (!Array.isArray(items)) {
       items = [items];
     }
 
-    // Берём только первые 5 записей с нормальными заголовками
     return items
       .filter((it) => it.title && it.link)
-      .slice(0, 5)
       .map((it) => {
         const rawDate =
           it.pubDate ||
@@ -69,16 +119,19 @@ async function fetchRssItems(source) {
           it["atom:updated"];
 
         let date = rawDate ? new Date(rawDate) : new Date();
+        if (isNaN(date.getTime())) date = new Date();
 
-        // Если дата не распарсилась — ставим сейчас
-        if (isNaN(date.getTime())) {
-          date = new Date();
-        }
+        const descriptionRaw =
+          it["content:encoded"] || it.description || it.summary || "";
+        const description = stripHtml(descriptionRaw);
+        const image = extractImageFromItem(it);
 
         return {
           title: it.title,
           link: it.link,
           date,
+          description,
+          image,
           source
         };
       });
@@ -88,40 +141,51 @@ async function fetchRssItems(source) {
   }
 }
 
-async function fetchTrendsText() {
+// Собираем все источники и выбираем ОДНУ самую свежую новость
+async function getTopItem() {
   const lists = await Promise.all(RSS_SOURCES.map(fetchRssItems));
-  const allItems = lists.flat();
+  const allItems = lists.flat().filter(Boolean);
 
-  if (!allItems.length) {
-    return "Сегодня не удалось собрать новости по моде и музыке — источники ничего не вернули.";
-  }
+  if (!allItems.length) return null;
 
-  // Сортируем по дате: от новых к старым
   allItems.sort((a, b) => b.date - a.date);
+  return allItems[0]; // самая свежая
+}
 
-  // Берём, например, топ-6 свежих
-  const top = allItems.slice(0, 6);
+// Формируем красивый текст на русском для подписи
+function buildCaption(item) {
+  const title = item.title || "Без названия";
+  const descShort = truncate(item.description, 400); // кратко
+  const sourceName = item.source.section || item.source.name || "";
+  const link = item.link || "";
 
   const lines = [];
-  lines.push("⚡ Свежие тренды: мода, кроссовки, музыка");
+
+  lines.push("📰 Новость из мира молодежной культуры");
+  lines.push("");
+  lines.push(`💥 <b>${title}</b>`);
   lines.push("");
 
-  top.forEach((item, index) => {
-    lines.push(
-      `${index + 1}. ${item.title} — ${item.source.section}`
-    );
-    if (item.link) {
-      lines.push(item.link);
-    }
+  if (descShort) {
+    lines.push(descShort);
     lines.push("");
-  });
+  }
 
+  if (sourceName) {
+    lines.push(`Источник: ${sourceName}`);
+  }
+
+  if (link) {
+    lines.push(link);
+  }
+
+  lines.push("");
   lines.push("#мода #музыка #streetwear #youthculture");
 
   return lines.join("\n");
 }
 
-// Сам handler для Vercel
+// Vercel handler: 1 запуск = 1 пост = 1 новость
 export default async function handler(req, res) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHANNEL_ID) {
     return res.status(500).json({
@@ -131,27 +195,65 @@ export default async function handler(req, res) {
   }
 
   try {
-    const text = await fetchTrendsText();
+    const item = await getTopItem();
 
-    const tgRes = await fetch(`${TELEGRAM_API}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: TELEGRAM_CHANNEL_ID,
-        text,
-        parse_mode: "HTML",
-        disable_web_page_preview: false
-      })
-    });
-
-    const data = await tgRes.json();
-
-    if (!data.ok) {
-      console.error("Telegram error:", data);
-      return res.status(500).json({ ok: false, error: data });
+    if (!item) {
+      const fallbackText =
+        "Сегодня не удалось найти свежие новости по моде и музыке.";
+      const tgRes = await fetch(`${TELEGRAM_API}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: TELEGRAM_CHANNEL_ID,
+          text: fallbackText
+        })
+      });
+      const data = await tgRes.json();
+      return res.status(200).json({ ok: data.ok, result: data });
     }
 
-    return res.status(200).json({ ok: true, result: data.result });
+    const caption = buildCaption(item);
+
+    // Если есть картинка — шлём sendPhoto, иначе sendMessage
+    if (item.image) {
+      const tgRes = await fetch(`${TELEGRAM_API}/sendPhoto`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: TELEGRAM_CHANNEL_ID,
+          photo: item.image,
+          caption,
+          parse_mode: "HTML"
+        })
+      });
+      const data = await tgRes.json();
+
+      if (!data.ok) {
+        console.error("Telegram sendPhoto error:", data);
+        return res.status(500).json({ ok: false, error: data });
+      }
+
+      return res.status(200).json({ ok: true, result: data.result });
+    } else {
+      const tgRes = await fetch(`${TELEGRAM_API}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: TELEGRAM_CHANNEL_ID,
+          text: caption,
+          parse_mode: "HTML",
+          disable_web_page_preview: false
+        })
+      });
+      const data = await tgRes.json();
+
+      if (!data.ok) {
+        console.error("Telegram sendMessage error:", data);
+        return res.status(500).json({ ok: false, error: data });
+      }
+
+      return res.status(200).json({ ok: true, result: data.result });
+    }
   } catch (e) {
     console.error("Unexpected error:", e);
     return res.status(500).json({ ok: false, error: e.message });
